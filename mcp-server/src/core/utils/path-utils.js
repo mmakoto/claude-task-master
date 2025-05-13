@@ -75,6 +75,23 @@ export function getPackagePath() {
 }
 
 /**
+ * Normalizes a potentially URL-encoded Windows path to a standard format
+ * @param {string} inputPath - The path to normalize
+ * @returns {string} - Normalized path
+ */
+function normalizeWindowsPath(inputPath) {
+	if (!inputPath) return inputPath;
+
+	// Handle URL-encoded drive letters (e.g., /d%3A/ -> D:/)
+	let normalizedPath = inputPath.replace(/^\/([a-zA-Z])%3A\//, '$1:/');
+
+	// Convert remaining forward slashes to the OS-specific separator
+	normalizedPath = path.normalize(normalizedPath);
+
+	return normalizedPath;
+}
+
+/**
  * Finds the absolute path to the tasks.json file based on project root and arguments.
  * @param {Object} args - Command arguments, potentially including 'projectRoot' and 'file'.
  * @param {Object} log - Logger object.
@@ -89,15 +106,16 @@ export function findTasksJsonPath(args, log) {
 
 	// 1. If project root is explicitly provided (e.g., from MCP session), use it directly
 	if (args.projectRoot) {
-		const projectRoot = args.projectRoot;
-		log.info(`Using explicitly provided project root: ${projectRoot}`);
+		const projectRoot = normalizeWindowsPath(args.projectRoot);
+		log.info(`Using explicitly provided project root (normalized): ${projectRoot}`);
 		try {
 			// This will throw if tasks.json isn't found within this root
 			return findTasksJsonInDirectory(projectRoot, args.file, log);
 		} catch (error) {
 			// Include debug info in error
 			const debugInfo = {
-				projectRoot,
+				originalProjectRoot: args.projectRoot,
+				normalizedProjectRoot: projectRoot,
 				currentDir: process.cwd(),
 				serverDir: path.dirname(process.argv[1]),
 				possibleProjectRoot: path.resolve(
@@ -293,101 +311,107 @@ function findTasksWithNpmConsideration(startDir, log) {
 }
 
 /**
- * Finds potential PRD document files based on common naming patterns
- * @param {string} projectRoot - The project root directory
- * @param {string|null} explicitPath - Optional explicit path provided by the user
+ * Find the PRD document path based on project root and optional explicit path
+ * @param {string} projectRoot - Project root directory
+ * @param {string} explicitPath - Optional explicit path to PRD document
  * @param {Object} log - Logger object
- * @returns {string|null} - The path to the first found PRD file, or null if none found
+ * @returns {string} - Absolute path to PRD document
  */
 export function findPRDDocumentPath(projectRoot, explicitPath, log) {
-	// If explicit path is provided, check if it exists
-	if (explicitPath) {
-		const fullPath = path.isAbsolute(explicitPath)
-			? explicitPath
-			: path.resolve(projectRoot, explicitPath);
+	const normalizedRoot = normalizeWindowsPath(projectRoot);
+	log.info(`Finding PRD document in normalized root: ${normalizedRoot}`);
 
-		if (fs.existsSync(fullPath)) {
-			log.info(`Using provided PRD document path: ${fullPath}`);
-			return fullPath;
-		} else {
-			log.warn(
-				`Provided PRD document path not found: ${fullPath}, will search for alternatives`
-			);
+	if (explicitPath) {
+		const absolutePath = path.isAbsolute(explicitPath)
+			? explicitPath
+			: path.resolve(normalizedRoot, explicitPath);
+
+		if (fs.existsSync(absolutePath)) {
+			log.info(`Using explicit PRD path: ${absolutePath}`);
+			return absolutePath;
 		}
+		log.warn(`Explicit PRD path not found: ${absolutePath}`);
 	}
 
-	// Common locations and file patterns for PRD documents
-	const commonLocations = [
-		'', // Project root
-		'scripts/'
+	// Check default locations
+	const defaultLocations = [
+		path.join(normalizedRoot, 'scripts', 'prd.txt'),
+		path.join(normalizedRoot, 'scripts', 'prd.md'),
+		path.join(normalizedRoot, 'docs', 'prd.txt'),
+		path.join(normalizedRoot, 'docs', 'prd.md'),
+		path.join(normalizedRoot, 'prd.txt'),
+		path.join(normalizedRoot, 'prd.md')
 	];
 
-	const commonFileNames = ['PRD.md', 'prd.md', 'PRD.txt', 'prd.txt'];
-
-	// Check all possible combinations
-	for (const location of commonLocations) {
-		for (const fileName of commonFileNames) {
-			const potentialPath = path.join(projectRoot, location, fileName);
-			if (fs.existsSync(potentialPath)) {
-				log.info(`Found PRD document at: ${potentialPath}`);
-				return potentialPath;
-			}
+	for (const prdPath of defaultLocations) {
+		if (fs.existsSync(prdPath)) {
+			log.info(`Found PRD at: ${prdPath}`);
+			return prdPath;
 		}
 	}
 
-	log.warn(`No PRD document found in common locations within ${projectRoot}`);
+	log.warn(`No PRD document found in default locations`);
 	return null;
 }
 
 /**
- * Resolves the tasks output directory path
- * @param {string} projectRoot - The project root directory
- * @param {string|null} explicitPath - Optional explicit output path provided by the user
+ * Resolve the output path for tasks.json
+ * @param {string} projectRoot - Project root directory
+ * @param {string} explicitPath - Optional explicit output path
  * @param {Object} log - Logger object
- * @returns {string} - The resolved tasks directory path
+ * @returns {string} - Absolute path for tasks.json output
  */
 export function resolveTasksOutputPath(projectRoot, explicitPath, log) {
-	// If explicit path is provided, use it
+	const normalizedRoot = normalizeWindowsPath(projectRoot);
+	log.info(`Resolving tasks output path from normalized root: ${normalizedRoot}`);
+
 	if (explicitPath) {
-		const outputPath = path.isAbsolute(explicitPath)
+		const absolutePath = path.isAbsolute(explicitPath)
 			? explicitPath
-			: path.resolve(projectRoot, explicitPath);
+			: path.resolve(normalizedRoot, explicitPath);
 
-		log.info(`Using provided tasks output path: ${outputPath}`);
-		return outputPath;
+		// Ensure the directory exists
+		const dir = path.dirname(absolutePath);
+		if (!fs.existsSync(dir)) {
+			log.info(`Creating output directory: ${dir}`);
+			fs.mkdirSync(dir, { recursive: true });
+		}
+
+		log.info(`Using explicit output path: ${absolutePath}`);
+		return absolutePath;
 	}
 
-	// Default output path: tasks/tasks.json in the project root
-	const defaultPath = path.resolve(projectRoot, 'tasks', 'tasks.json');
-	log.info(`Using default tasks output path: ${defaultPath}`);
+	// Default to tasks/tasks.json in project root
+	const defaultPath = path.join(normalizedRoot, 'tasks', 'tasks.json');
+	const defaultDir = path.dirname(defaultPath);
 
-	// Ensure the directory exists
-	const outputDir = path.dirname(defaultPath);
-	if (!fs.existsSync(outputDir)) {
-		log.info(`Creating tasks directory: ${outputDir}`);
-		fs.mkdirSync(outputDir, { recursive: true });
+	if (!fs.existsSync(defaultDir)) {
+		log.info(`Creating default tasks directory: ${defaultDir}`);
+		fs.mkdirSync(defaultDir, { recursive: true });
 	}
 
+	log.info(`Using default output path: ${defaultPath}`);
 	return defaultPath;
 }
 
 /**
- * Resolves various file paths needed for MCP operations based on project root
+ * Resolves all project-related paths based on the project root
  * @param {string} projectRoot - The project root directory
- * @param {Object} args - Command arguments that may contain explicit paths
+ * @param {Object} args - Command arguments
  * @param {Object} log - Logger object
- * @returns {Object} - An object containing resolved paths
+ * @returns {Object} - Object containing resolved paths
  */
 export function resolveProjectPaths(projectRoot, args, log) {
-	const prdPath = findPRDDocumentPath(projectRoot, args.input, log);
-	const tasksJsonPath = resolveTasksOutputPath(projectRoot, args.output, log);
+	const normalizedRoot = normalizeWindowsPath(projectRoot);
+	log.info(`Resolving project paths from normalized root: ${normalizedRoot}`);
 
-	// You can add more path resolutions here as needed
-
-	return {
-		projectRoot,
-		prdPath,
-		tasksJsonPath
-		// Add additional path properties as needed
+	const paths = {
+		projectRoot: normalizedRoot,
+		tasksFile: findTasksJsonPath({ projectRoot: normalizedRoot, file: args?.file }, log),
+		prdDoc: findPRDDocumentPath(normalizedRoot, args?.input, log),
+		outputDir: resolveTasksOutputPath(normalizedRoot, args?.output, log)
 	};
+
+	log.info(`Resolved project paths: ${JSON.stringify(paths, null, 2)}`);
+	return paths;
 }
